@@ -2234,7 +2234,7 @@
     // an exception is thrown breaking Opal altogether.
     try {
       Object.defineProperty(wrapped, 'length', { value: body.length });
-    } catch (e) {}
+    } catch {}
 
     wrapped.$$arity           = body.$$arity == null ? body.length : body.$$arity;
     wrapped.$$parameters      = body.$$parameters;
@@ -2374,10 +2374,8 @@
 
   function $hash_delete_stage2(hash, key) {
     var value = hash.get(key);
-    if (value !== undefined) {
-      hash.delete(key);
-      return value;
-    }
+    hash.delete(key);
+    return value;
   }
 
   Opal.hash_delete = function(hash, key) {

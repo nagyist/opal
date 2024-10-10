@@ -1,6 +1,8 @@
 require 'lib/spec_helper'
+require 'opal/os'
 require 'opal/builder'
 require 'opal/builder/scheduler/sequential'
+require 'opal/builder/scheduler/threaded'
 require 'tmpdir'
 
 RSpec.describe Opal::Builder do
@@ -8,9 +10,23 @@ RSpec.describe Opal::Builder do
   let(:options) { {} }
   let(:ruby_processor) { Opal::Builder::Processor::RubyProcessor }
 
+  def temporarily_with_prefork_scheduler(&block)
+    previous = Opal.builder_scheduler
+    Opal.builder_scheduler = Opal::Builder::Scheduler::Prefork
+    yield
+    Opal.builder_scheduler = previous
+  end
+
   def temporarily_with_sequential_scheduler(&block)
     previous = Opal.builder_scheduler
     Opal.builder_scheduler = Opal::Builder::Scheduler::Sequential
+    yield
+    Opal.builder_scheduler = previous
+  end
+
+  def temporarily_with_threaded_scheduler(&block)
+    previous = Opal.builder_scheduler
+    Opal.builder_scheduler = Opal::Builder::Scheduler::Threaded
     yield
     Opal.builder_scheduler = previous
   end
@@ -38,34 +54,11 @@ RSpec.describe Opal::Builder do
     end
   end
 
-  describe ':prerequired' do
-    let(:options) { {prerequired: ['foo']} }
-
-    it 'compiles them as empty files' do
-      source = 'require "foo"'
-      builder.build_str(source, 'bar.rb')
-    end
-  end
-
-  describe ':preload' do
-    let(:options) { {preload: ['base64']} }
-
-    around(:each) { |example| temporarily_with_sequential_scheduler(&example) }
-
-    it 'compiles them as empty files' do
-      source = 'puts 5'
-      expect(ruby_processor).to receive('new').with(anything, './base64.rb', anything, anything).once.and_call_original
-      expect(ruby_processor).to receive('new').with(source, anything, anything, anything).once.and_call_original
-
-      builder.build_str(source, 'bar.rb')
-    end
-  end
-
   describe 'dup' do
     it 'duplicates internal structures' do
       b2 = builder.dup
       b2.should_not equal(builder)
-      [:stubs, :preload, :processors, :path_reader, :prerequired, :compiler_options, :processed].each do |m|
+      [:stubs, :processors, :path_reader, :compiler_options, :processed].each do |m|
         b2.send(m).should_not equal(builder.send(m))
       end
     end
@@ -120,7 +113,7 @@ RSpec.describe Opal::Builder do
       let(:options) { {missing_require_severity: :warning} }
       it 'warns the user' do
         expect(builder.missing_require_severity).to eq(:warning)
-        expect(builder).to receive(:warn) { |message| expect(message).to start_with(%{can't find file: "non-existen-file"}) }.at_least(1)
+        expect(builder).to receive(:warn) { |message| expect(message).to start_with(%{Warning: can't find file: "non-existen-file"}) }.at_least(1)
         builder.build_str("require 'non-existen-file'", 'foo.rb')
       end
     end
@@ -158,12 +151,30 @@ RSpec.describe Opal::Builder do
 
   describe 'output order' do
     it 'is preserved with a prefork scheduler' do
-      my_builder = builder.dup
-      my_builder.append_paths(File.expand_path('..', __FILE__))
-      my_builder.cache = Opal::Cache::NullCache.new
-      10.times do |i| # Increase entropy
+      skip "Scheduler::Prefork not available for #{RUBY_ENGINE}" if %w[jruby truffleruby].include?(RUBY_ENGINE)
+      skip "Scheduler::Prefork not available on Windows" if Opal::OS.windows?
+      temporarily_with_prefork_scheduler do
+        my_builder = builder.dup
+        my_builder.append_paths(File.expand_path('..', __FILE__))
+        my_builder.cache = Opal::Cache::NullCache.new
+        10.times do |i| # Increase entropy
+          expect(
+            my_builder.dup.build('fixtures/build_order').to_s.scan(/(FILE_[0-9]+)/).map(&:first)
+          ).to eq(%w[
+            FILE_1 FILE_2 FILE_3 FILE_4
+            FILE_51 FILE_5
+            FILE_61 FILE_62 FILE_63 FILE_64 FILE_6
+            FILE_7
+          ])
+        end
+      end
+    end
+
+    it 'is preserved with a sequential scheduler' do
+      temporarily_with_sequential_scheduler do
+        builder.append_paths(File.expand_path('..', __FILE__))
         expect(
-          my_builder.dup.build('fixtures/build_order').to_s.scan(/(FILE_[0-9]+)/).map(&:first)
+          builder.build('fixtures/build_order').to_s.scan(/(FILE_[0-9]+)/).map(&:first)
         ).to eq(%w[
           FILE_1 FILE_2 FILE_3 FILE_4
           FILE_51 FILE_5
@@ -173,8 +184,9 @@ RSpec.describe Opal::Builder do
       end
     end
 
-    it 'is preserved with a sequential scheduler' do
-      temporarily_with_sequential_scheduler do
+    it 'is preserved with a threaded scheduler' do
+      skip 'Scheduler::Threaded is only available for JRuby, TruffleRuby' unless %w[jruby truffleruby].include?(RUBY_ENGINE)
+      temporarily_with_threaded_scheduler do
         builder.append_paths(File.expand_path('..', __FILE__))
         expect(
           builder.build('fixtures/build_order').to_s.scan(/(FILE_[0-9]+)/).map(&:first)
